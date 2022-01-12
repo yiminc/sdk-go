@@ -1154,6 +1154,15 @@ func (weh *workflowExecutionEventHandlerImpl) handleMarkerRecorded(
 	return nil
 }
 
+func copyProto(from proto.Message, to proto.Message) error {
+	data, err := proto.Marshal(from)
+	if err != nil {
+		return err
+	}
+
+	return proto.Unmarshal(data, to)
+}
+
 func (weh *workflowExecutionEventHandlerImpl) handleLocalActivityMarker(details map[string]*commonpb.Payloads, failure *failurepb.Failure) error {
 	var markerData *commonpb.Payloads
 	var ok bool
@@ -1176,13 +1185,26 @@ func (weh *workflowExecutionEventHandlerImpl) handleLocalActivityMarker(details 
 		delete(weh.pendingLaTasks, lamd.ActivityID)
 		delete(weh.unstartedLaTasks, lamd.ActivityID)
 		lar := &LocalActivityResultWrapper{}
+		// Result and failure are already encoded by data converter, and they are used to create command by calling
+		// weh.commandsHelper.recordLocalActivityMarker().
+		// Now we want to deliver result and failure to user code by set them to lar.Result and lar.Err and then call
+		// la.callback(lar). When user code access the payload of result and failure, the payload will be decoded.
+		// We need to make copy of result and failure when when they are decoded, the data in command does not change.
 		if failure != nil {
 			lar.Attempt = lamd.Attempt
 			lar.Backoff = lamd.Backoff
-			lar.Err = ConvertFailureToError(failure, weh.GetDataConverter())
-		} else {
+			failureCopy := &failurepb.Failure{}
+			if err := copyProto(failure, failureCopy); err != nil {
+				return err
+			}
+			lar.Err = ConvertFailureToError(failureCopy, weh.GetDataConverter())
+		} else if payloads, ok := details[localActivityResultName]; ok{
 			// Result might not be there if local activity doesn't have return value.
-			lar.Result = details[localActivityResultName]
+			payloadsCopy := &commonpb.Payloads{}
+			if err := copyProto(payloads, payloadsCopy); err != nil {
+				return err
+			}
+			lar.Result = payloadsCopy
 		}
 		la.callback(lar)
 
